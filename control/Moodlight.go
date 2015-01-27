@@ -16,6 +16,8 @@ const nLEDs = 92
 var steps = 1000
 var timestep = 40 // milliseconds
 
+var fadelmodes = 3
+
 func map7(in uint8) uint8 {
 	return uint8(float64(in) * (127.0 / 255.0))
 }
@@ -74,7 +76,7 @@ func main() {
 	// Default Luminance
 	l = 0.5
 	// Switches fading luminance along the strip
-	fadel := true
+	fadel := 1
 
 	// Mutable state increment
 	tau := 0
@@ -112,6 +114,15 @@ mainloop:
 					}
 				case termbox.KeyCtrlS: // Switch fades on and off
 					fades = !fades
+        case termbox.KeyCtrlL:
+          fadel++
+          if fadel >= fadelmodes {
+            fadel = 0
+          }
+
+          if fadel == 0 {
+            l = 0.5
+          }
 				default:
 					switch c.Ch {
 					case 'S':
@@ -139,8 +150,12 @@ mainloop:
 		}
 
 		for i := 0; i < nLEDs; i++ {
-			if fadel {
+      switch fadel {
+      case 0:
+      case 1:
 				l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*3))
+      case 2:
+        l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*1))
 			}
 			r, g, b = color.HSLToRGB(h, s, l)
 			buf[1+i*3], buf[2+i*3], buf[3+i*3] = map7(g)|0x80, map7(r)|0x80, map7(b)|0x80
