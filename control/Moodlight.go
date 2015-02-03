@@ -1,37 +1,42 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"math/rand"
-	"os"
+	"net"
+	"strconv"
 	"time"
 
 	"code.google.com/p/sadbox/color"
 	"github.com/nsf/termbox-go"
-	"github.com/tarm/goserial"
 )
 
 const nLEDs = 92
+const directMagicByte = 0x84
+const serverMagicByte = 0x0F
 
 var steps = 1000
-var timestep = 40 // milliseconds
+var timestep = 60 * time.Millisecond // milliseconds
 
 var fadelmodes = 3
+
+var directFlag = flag.Bool("direct", false, "When true, uses 0x84 magic bytes instead of 0x0F magic bytes to separate packets")
 
 func map7(in uint8) uint8 {
 	return uint8(float64(in) * (127.0 / 255.0))
 }
 
 func main() {
+	flag.Parse()
 	// Seed random number generator
 	rand.Seed(time.Now().UnixNano())
 
-	// Open the serial port
-	c := &serial.Config{Name: os.Args[1], Baud: 115200}
-	ser, err := serial.OpenPort(c)
+	conn, err := net.Dial("tcp", "bedroom_leds:9996")
 	if err != nil {
-		log.Fatalln("Trouble opening serial: ", err)
+		log.Fatalln("Couldn't open localhost: ", err)
 	}
+	defer conn.Close()
 
 	// Termbox
 	err = termbox.Init()
@@ -56,7 +61,11 @@ func main() {
 	}()
 
 	buf := make([]byte, (nLEDs*3 + 1))
-	buf[0] = 0x84
+	if *directFlag {
+		buf[0] = directMagicByte
+	} else {
+		buf[0] = serverMagicByte
+	}
 
 	var r, g, b uint8
 	var h, s, l float64
@@ -82,9 +91,9 @@ func main() {
 	tau := 0
 
 	// Time between updates
-	tick := time.Tick(40 * time.Millisecond)
+	tick := time.Tick(timestep)
 mainloop:
-	for _ = range tick {
+	for {
 		select {
 		case c := <-evchan:
 			switch c.Type {
@@ -114,15 +123,15 @@ mainloop:
 					}
 				case termbox.KeyCtrlS: // Switch fades on and off
 					fades = !fades
-        case termbox.KeyCtrlL:
-          fadel++
-          if fadel >= fadelmodes {
-            fadel = 0
-          }
+				case termbox.KeyCtrlL:
+					fadel++
+					if fadel >= fadelmodes {
+						fadel = 0
+					}
 
-          if fadel == 0 {
-            l = 0.5
-          }
+					if fadel == 0 {
+						l = 0.5
+					}
 				default:
 					switch c.Ch {
 					case 'S':
@@ -150,20 +159,35 @@ mainloop:
 		}
 
 		for i := 0; i < nLEDs; i++ {
-      switch fadel {
-      case 0:
-      case 1:
+			switch fadel {
+			case 0:
+			case 1:
 				l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*3))
-      case 2:
-        l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*1))
+			case 2:
+				l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*1))
 			}
 			r, g, b = color.HSLToRGB(h, s, l)
 			buf[1+i*3], buf[2+i*3], buf[3+i*3] = map7(g)|0x80, map7(r)|0x80, map7(b)|0x80
 		}
-		ser.Write(buf)
 		tau = (tau + 1)
 		if tau%steps == 0 {
 			pingpong = !pingpong
+		}
+		conn.Write(buf)
+
+		readBuf := make([]byte, 24)
+		n, err := conn.Read(readBuf)
+		if err != nil {
+			log.Fatalln("Couldn't read: ", err)
+		}
+
+		npackets, err := strconv.ParseInt(string(readBuf[:n-1]), 10, 64)
+		if err != nil {
+			log.Fatalln("Couln't convert: ", err)
+		}
+
+		if npackets >= 4 {
+			<-tick
 		}
 	}
 }
