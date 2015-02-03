@@ -32,7 +32,7 @@ func main() {
 	// Seed random number generator
 	rand.Seed(time.Now().UnixNano())
 
-	conn, err := net.Dial("tcp", "bedroom_leds:9996")
+	conn, err := net.Dial("tcp", "localhost:9996")
 	if err != nil {
 		log.Fatalln("Couldn't open localhost: ", err)
 	}

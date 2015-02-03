@@ -18,7 +18,7 @@ func main() {
 	}
 
 	buf := make([]byte, (nLEDs*3 + 1))
-	buf[0] = 0x84
+	buf[0] = 0x0F
 	for i := 0; i < nLEDs; i++ {
 		buf[1+i*3], buf[2+i*3], buf[3+i*3] = 0x80, 0x80, 0x80
 	}

@@ -27,7 +27,7 @@ int serialport_init(const char* serialport, int baud)
     int fd;
     
     //fd = open(serialport, O_RDWR | O_NOCTTY | O_NDELAY);
-    fd = open(serialport, O_RDWR | O_NONBLOCK );
+    fd = open(serialport, O_RDWR );
     
     if (fd == -1)  {
         perror("serialport_init: Unable to open port ");

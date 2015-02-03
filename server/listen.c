@@ -49,8 +49,7 @@ void init_queue() {
   
 }
 
-void PushQueue()
-{
+void PushQueue() {
     end = (end + 1) % BUFFER_SIZE;
 
     if (active < BUFFER_SIZE)
@@ -62,8 +61,7 @@ void PushQueue()
     }
 }
 
-struct item *RetrieveFromQueue(void)
-{
+struct item *RetrieveFromQueue(void) {
     struct item *p;
 
     if (!active) { return NULL; }
@@ -184,23 +182,9 @@ int setup_timer() {
   return fd;
 }
 
-int main() {
+int setup_server_socket() {
   struct sockaddr_in servAddr;
-  struct sockaddr_in clientAddr;
   int servSock;
-  int clientSock;
-  int serialPort;
-  fd_set reads;
-  int avail;
-
-  int timer = setup_timer();
-
-  // Init serial port
-  if((serialPort = serialport_init("/dev/ttyACM0", 115200)) < 0) {
-    fprintf(stderr, "Error opening serial port\n");
-    exit(1);
-  }
-
   // Clear and set servAddr
   memset((void*)&servAddr, 0, sizeof(servAddr));
   servAddr.sin_family = AF_INET;
@@ -208,26 +192,54 @@ int main() {
   servAddr.sin_port = htons(SRVPORT);
 
   if((servSock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
-    fprintf(stderr, "Encountered error opening socket\n");
-    err(1, NULL);
-    exit(1);
+    err(1, "Encountered error opening socket");
+    return -1;
   }
 
 
   if(bind(servSock, (struct sockaddr *) &servAddr, sizeof(servAddr)) < 0) {
-    fprintf(stderr, "Couldn't bind\n");
-    err(1, NULL);
-    exit(1);
+    err(1, "Couldn't bind");
+    return -1;
   }
 
   if(listen(servSock, MAXPENDING) <0) {
-    fprintf(stderr, "Cannot listen\n");
-    exit(1);
+    err(1, "Couldn't Listen");
+    return -1;
   }
 
-  printf("listening\n");
-  uint8_t echoBuffer[RECVBUFFLEN];        /* Buffer for echo string */
-  ssize_t recvMsgSize = 0;                    /* Size of received message */
+  fprintf(stdout, "Listening\n");
+  return servSock;
+}
+
+void send_queue_length(int clientSock) {
+      char sendBuf[10];
+      // Send number of currently queued packets
+      int sendlen = sprintf(sendBuf, "%d", active);
+      if(send(clientSock, sendBuf, sendlen + 1, 0) != (sendlen + 1)) {
+        exit(1);
+      }
+}
+
+void write_to_serial(int serialPort) {
+  // Retrieve next packet
+  struct item *d = RetrieveFromQueue();
+  // Replace magicbyte
+  d->buf[0] = COMMANDBYTE;
+
+  // Write to arduino
+  int n = write(serialPort, d->buf, PACKETLENGTH);
+  if(n != PACKETLENGTH) {
+    err(1, "Could not write complete string");
+    exit(1);
+  }
+}
+
+int main() {
+  struct sockaddr_in clientAddr;
+  int servSock;
+  int clientSock;
+  uint8_t echoBuffer[RECVBUFFLEN];
+  ssize_t recvMsgSize = 0;
   uint8_t partialBuf[RECVBUFFLEN];
   int  partialBufLen = 0;
   int parseret = 0;
@@ -235,28 +247,46 @@ int main() {
   uint8_t itembuf[PACKETLENGTH];
   unsigned long long missed;
 
-  char sendBuf[10];
+  int serialPort;
+
+  fd_set reads;
+  int avail;
+
+  int timer = setup_timer();
+
+  // Initialize socket
+  if((servSock = setup_server_socket()) < 0) {
+    exit(1);
+  }
+
+  // Init serial port
+  if((serialPort = serialport_init("/dev/ttyACM0", 115200)) < 0) {
+    fprintf(stderr, "Error opening serial port\n");
+    exit(1);
+  }
+
 
   for(;parseret >= 0;) {
-    partialBufLen = 0;
     unsigned int clientLen = sizeof(clientAddr);
 
     if((clientSock = accept(servSock, (struct sockaddr *) &clientAddr, &clientLen)) < 0) {
       fprintf(stderr, "Couldn't accept\n");
       exit(1);
     }
-
-    printf("Handling client\n");
-
-    // CLEAR BUFFER
-    free_packetbuffer();
-    init_queue();
+    fprintf(stdout, "Handling client\n");
 
     /* Receive message from client */
     if((recvMsgSize = recv(clientSock, (void*)echoBuffer, sizeof(echoBuffer), 0)) < 0) {
       fprintf(stderr, "recv failed\n");
       exit(1);
     }
+
+    // CLEAR BUFFER
+    free_packetbuffer();
+    init_queue();
+
+    // Reset partial buffer
+    partialBufLen = 0;
 
     /* Send received string and receive again until end of transmission */
     while(recvMsgSize > 0)      /* zero indicates end of transmission */
@@ -290,11 +320,8 @@ int main() {
 #ifdef DEBUG
       fprintf(stderr, "%d packets in queue\n", active);
 #endif
-      // Send number of currently queued packets
-      int sendlen = sprintf(sendBuf, "%d", active);
-      if(send(clientSock, sendBuf, sendlen + 1, 0) != (sendlen + 1)) {
-        exit(1);
-      }
+
+      send_queue_length(clientSock);
 
       for(;;) {
         // Select
@@ -309,17 +336,7 @@ int main() {
             read(timer, &missed, sizeof(missed));
 
             while(missed-- && active) {
-              // Retrieve next packet
-              struct item *d = RetrieveFromQueue();
-              // Replace magicbyte
-              d->buf[0] = COMMANDBYTE;
-
-              // Write to arduino
-              int n = write(serialPort, d->buf, PACKETLENGTH);
-              if(n != PACKETLENGTH) {
-                err(1, "Could not write complete string");
-                exit(1);
-              }
+              write_to_serial(serialPort);
             }
           }
 

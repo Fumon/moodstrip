@@ -8,8 +8,8 @@ OBJS += arduino-serial-lib.o
 CC = gcc
 LD = gcc
 
-CFLAGS += -Os -Wall -Wextra -I$(SDK)/usr/include
-# CFLAGS += -ggdb3
+CFLAGS += -Os -Wall -Wextra -pg #I$(SDK)/usr/include
+#CFLAGS += -ggdb3
 LDFLAGS += -L$(SDK)/usr/lib -L$(TOOL)/lib -L$(TOOL)/usr/lib -Wl,-rpath=$(TOOL)/lib $(LIBS)
 
 all: exe
@@ -17,7 +17,7 @@ all: exe
 exe: $(BINARY).exe
 
 %.exe: $(OBJS) 
-	$(LD) -o $(*) $(OBJS) $(LDFLAGS)
+	$(LD) -pg -o $(*) $(OBJS) $(LDFLAGS)
 
 %.o: %.c Makefile
 	$(CC) $(CFLAGS) -o $@ -c $<
