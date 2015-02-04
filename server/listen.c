@@ -12,6 +12,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 
 #include <signal.h>
 #include <sys/signalfd.h>
@@ -210,7 +211,7 @@ void send_queue_length(int clientSock) {
         exit(1);
       }
 }
-#define STEPS 1000
+#define STEPS 100
 
 uint8_t map7(uint8_t in) {
   float tmp = (double)in * (127.0 / 255.0);
@@ -228,12 +229,14 @@ void GeneratePacket() {
   uint8_t *buf = &npkt[1];
 
   // Temp
-  H = 0.8;
-  S = 0.8;
+  H = 0.6;
+  S = 1.0;
 
   npkt[0] = COMMANDBYTE;
   for(i = 0; i < nLEDS; ++i) {
-    L = (0.008 / (double)nLEDS) * (double)((i + tau)%(nLEDS));
+    double ltau = (sin(((M_PI * 2.0)/(double)nLEDS) * (i + tau/10)) * 0.5) + 0.5;
+    
+    L = 0.008 * ltau;
     HSL_to_RGB(H, S, L, &R, &G, &B);
     buf[i*3] = 0x80|map7(G);
     buf[1+(i*3)] = 0x80|map7(R);
@@ -304,7 +307,6 @@ struct timespec tsAdd (
   }
   return (result) ;
 }
-
 
 int main() {
   struct sockaddr_in clientAddr;
@@ -335,7 +337,7 @@ int main() {
   struct timespec next_time = {0, 0};
   struct timespec m40;
   m40.tv_sec = 0;
-  m40.tv_nsec = 20 * NSEC_PER_MSEC;
+  m40.tv_nsec = 5 * NSEC_PER_MSEC;
 
   // Initialize socket
   if((servSock = setup_server_socket()) < 0) {

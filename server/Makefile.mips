@@ -9,7 +9,7 @@ BINARY = listen
 OBJS = $(BINARY).o
 OBJS += arduino-serial-lib.o hsl_to_rgb.o
 
-# LIBS += -lrt -lusb-1.0
+LIBS += -lm
 
 CC = mipsel-openwrt-linux-gcc
 LD = mipsel-openwrt-linux-gcc
