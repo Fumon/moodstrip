@@ -1,4 +1,6 @@
+#define _GNU_SOURCE
 #include <stdio.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <string.h>
@@ -6,6 +8,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <err.h>
+#include <errno.h>
+#include <fcntl.h>
+
+#include <signal.h>
+#include <sys/signalfd.h>
+
+#include <sys/epoll.h>
 
 #include <sys/timerfd.h>
 
@@ -23,8 +32,10 @@
 #define MAXPENDING 1
 
 #define RECVBUFFLEN (PACKETLENGTH)
-#define MAXPACKETS 10
+#define MAXPACKETS 15
 #define BUFFER_SIZE MAXPACKETS
+
+#define MAX_EVENTS 3
 
 struct item {
   uint8_t buf[PACKETLENGTH];
@@ -234,24 +245,50 @@ void write_to_serial(int serialPort) {
   }
 }
 
+void makeSocketNonBlocking(int fd) {
+  int flags;
+ 
+  flags = fcntl(fd, F_GETFL, NULL);
+
+  if(-1 == flags) {
+    perror("fcntl F_GETFL failed");
+    exit(1);
+  }
+
+  flags |= O_NONBLOCK;
+
+  if(-1 == fcntl(fd, F_SETFL, flags)) {
+    perror("fcntl F_SETFL failed");
+    exit(1);
+  }       
+}
+
 int main() {
   struct sockaddr_in clientAddr;
   int servSock;
-  int clientSock;
-  uint8_t echoBuffer[RECVBUFFLEN];
-  ssize_t recvMsgSize = 0;
-  uint8_t partialBuf[RECVBUFFLEN];
+  int clientSock = -1;
+  int close_conn = 0;
+  ssize_t recvLen = 0;
+  uint8_t recvBuf[RECVBUFFLEN];
+
   int  partialBufLen = 0;
   int parseret = 0;
   size_t parseplace = 0;
+  uint8_t partialBuf[RECVBUFFLEN];
   uint8_t itembuf[PACKETLENGTH];
-  unsigned long long missed;
 
   int serialPort;
 
-  fd_set reads;
-  int avail;
+  sigset_t sigset;
+  int killSig;
+  int kill = 0;
 
+  // Epoll Vars
+  int epollfd;
+  int nfds, n;
+  struct epoll_event ev, events[MAX_EVENTS];
+
+  unsigned int missed = 0;
   int timer = setup_timer();
 
   // Initialize socket
@@ -265,98 +302,168 @@ int main() {
     exit(1);
   }
 
+  // Init signal handler
+  sigemptyset(&sigset);
+  sigaddset(&sigset, SIGINT);
+  if(sigprocmask(SIG_BLOCK, &sigset, NULL) < 0) {
+    perror("Couldn't mask signals");
+    exit(1);
+  }
 
-  for(;parseret >= 0;) {
-    unsigned int clientLen = sizeof(clientAddr);
+  if((killSig = signalfd(-1, &sigset, 0)) < 0) {
+    perror("Couldn't create signal fd");
+    exit(1);
+  }
+    
+  // Epoll
+  if((epollfd = epoll_create1(0)) < 0) {
+    perror("epoll_create1");
+    exit(1);
+  }
 
-    if((clientSock = accept(servSock, (struct sockaddr *) &clientAddr, &clientLen)) < 0) {
-      fprintf(stderr, "Couldn't accept\n");
+  // Add server socket
+  ev.events = EPOLLIN;
+  ev.data.fd = servSock; // For context
+  if(epoll_ctl(epollfd, EPOLL_CTL_ADD, servSock, &ev) < 0) {
+    perror("epoll_ctl: servSock");
+  }
+
+  // Add Timer
+  ev.events = EPOLLIN;
+  ev.data.fd = timer;
+  if(epoll_ctl(epollfd, EPOLL_CTL_ADD, timer, &ev) < 0) {
+    perror("epoll_ctl: timer");
+  }
+
+  // Add serial
+  ev.events = EPOLLOUT;
+  ev.data.fd = serialPort;
+  if(epoll_ctl(epollfd, EPOLL_CTL_ADD, serialPort, &ev) < 0) {
+    perror("epoll_ctl: serialPort");
+  }
+
+  // Add signal
+  ev.events = EPOLLIN;
+  ev.data.fd = killSig;
+  if(epoll_ctl(epollfd, EPOLL_CTL_ADD, killSig, &ev) < 0) {
+    perror("epoll_ctl: timer");
+  }
+
+  for(;kill == 0;) {
+    nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+    if(nfds == -1) {
+      perror("epoll_wait");
       exit(1);
     }
-    fprintf(stdout, "Handling client\n");
 
-    /* Receive message from client */
-    if((recvMsgSize = recv(clientSock, (void*)echoBuffer, sizeof(echoBuffer), 0)) < 0) {
-      fprintf(stderr, "recv failed\n");
-      exit(1);
-    }
+    for(n = 0; n < nfds; ++n) {
+      int curfd = events[n].data.fd;
+      if(curfd == servSock) {
+        // New Connection
+        unsigned int clientLen = sizeof(clientAddr);
 
-    // CLEAR BUFFER
-    free_packetbuffer();
-    init_queue();
-
-    // Reset partial buffer
-    partialBufLen = 0;
-
-    /* Send received string and receive again until end of transmission */
-    while(recvMsgSize > 0)      /* zero indicates end of transmission */
-    {
-      parseplace = 0;
-      // While current recvbuffer has content
-      do {
-        // Parse
-        if((parseret = parse_packet(&parseplace, echoBuffer, recvMsgSize, partialBuf,
-            &partialBufLen, itembuf)) < 0) {
-          fprintf(stderr, "Parse failed\n");
-          break;
+        if((clientSock = accept4(servSock,
+                (struct sockaddr *) &clientAddr, &clientLen, SOCK_NONBLOCK | SOCK_CLOEXEC)) < 0) {
+          perror("Accept");
+          exit(1);
         }
+        printf("Connection Accepted\n");
 
-        // If we have a packet,
-        if(parseret >= 1) {
-          // Copy buffer contents
-          memcpy(&(buffer[end]->buf), &itembuf, PACKETLENGTH);
-          // Push it into the queue
-          PushQueue();
+        // Add to events
+        ev.events = EPOLLIN;
+        ev.data.fd = clientSock;
+        if(epoll_ctl(epollfd, EPOLL_CTL_ADD, clientSock, &ev) < 0) {
+          perror("epoll_ctl: Adding Client");
         }
-
-        if(parseret == 2) {
-          break;
+        
+        // Now prepare for new data
+        free_packetbuffer();
+        init_queue();
+        close_conn = 0;
+        // Reset partial buffer
+        partialBufLen = 0;
+      } else if(curfd == timer) {
+        // Time to push to serial
+        // Add number of events
+        unsigned int mtmp; // TODO: Try changing this to a smaller type
+        read(timer, &mtmp, sizeof(mtmp));
+        missed += mtmp;
+      } else if(curfd == serialPort) {
+        // Check if we're to write yet
+        if(active) { // TODO: Maybe just framedrop?
+          do {
+            write_to_serial(serialPort);
+          } while(active > 0);
         }
-      } while(parseret > 0);
-
-      if(parseret < 0)
-        break;
-
-#ifdef DEBUG
-      fprintf(stderr, "%d packets in queue\n", active);
-#endif
-
-      send_queue_length(clientSock);
-
-      for(;;) {
-        // Select
-        FD_ZERO(&reads);
-        FD_SET(clientSock, &reads);
-        FD_SET(timer, &reads);
-        avail = select(FD_SETSIZE, &reads, (fd_set *) 0, (fd_set *) 0, NULL);
-
-        if(avail) {
-          if(FD_ISSET(timer, &reads) && active) {
-            // Clear timer
-            read(timer, &missed, sizeof(missed));
-
-            while(missed-- && active) {
-              write_to_serial(serialPort);
-            }
-          }
-
-          if(FD_ISSET(clientSock, &reads)) {
-            /* See if there is more data to receive */
-            if((recvMsgSize = recv(clientSock, (void*)echoBuffer, sizeof(echoBuffer), 0)) < 0) {
-              err(1, "Send Failed");
-              exit(1);
+      } else if(curfd == killSig) {
+        // Got a kill signal
+        kill = 1;
+      } else if(curfd == clientSock) {
+        // Receive data
+        parseplace = 0;
+        do {
+          recvLen = read(clientSock, (void *)recvBuf, sizeof(recvBuf));
+          if(recvLen < 0) {
+            if(errno != EWOULDBLOCK) {
+              perror("recv() failed");
+              // Close connection
+              close_conn = 1;
             }
             break;
           }
+
+          if((int)recvLen == 0) {
+            // Close connection
+            fprintf(stderr, "No data\n");
+            close_conn = 1;
+            break;
+          }
+
+          // Data
+          do {
+            // Parse
+            if((parseret = parse_packet(&parseplace, recvBuf, recvLen,
+                    partialBuf, &partialBufLen, itembuf)) < 0) {
+              fprintf(stderr, "Parse failed\n");
+              break;
+            }
+
+            // If we have a packet,
+            if(parseret >= 1) {
+              // Copy buffer contents
+              memcpy(&(buffer[end]->buf), &itembuf, PACKETLENGTH);
+              // Push it into the queue
+              PushQueue();
+            }
+
+            if(parseret == 2) {
+              break;
+            }
+          } while(parseret > 0);
+
+          if(parseret == -1) {
+            close_conn = 1;
+            break;
+          }
+        } while(1);
+        send_queue_length(clientSock);
+        fprintf(stderr, "Packets: %d\n", active);
+
+        if(close_conn) {
+          printf("Connection closed\n");
+          epoll_ctl(epollfd, EPOLL_CTL_DEL, clientSock, NULL);
+          close(clientSock);
         }
       }
     }
-
-    free_packetbuffer();
-    close(clientSock);    /* Close client socket */
-    fprintf(stderr, "Socket closed\n");
   }
   free_packetbuffer();
   fprintf(stderr, "Shutting down\n");
+  // Close stuff
+  close(clientSock);
+  shutdown(servSock, SHUT_RDWR);
+  close(servSock);
+  close(timer);
+  close(serialPort);
   return 0;
 }

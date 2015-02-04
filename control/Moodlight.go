@@ -15,6 +15,7 @@ import (
 const nLEDs = 92
 const directMagicByte = 0x84
 const serverMagicByte = 0x0F
+const bufferfill = 5
 
 var steps = 1000
 var timestep = 60 * time.Millisecond // milliseconds
@@ -32,14 +33,8 @@ func main() {
 	// Seed random number generator
 	rand.Seed(time.Now().UnixNano())
 
-	conn, err := net.Dial("tcp", "localhost:9996")
-	if err != nil {
-		log.Fatalln("Couldn't open localhost: ", err)
-	}
-	defer conn.Close()
-
 	// Termbox
-	err = termbox.Init()
+	err := termbox.Init()
 	if err != nil {
 		log.Fatalln("Trouble with termbox init: ", err)
 	}
@@ -60,11 +55,13 @@ func main() {
 		}
 	}()
 
-	buf := make([]byte, (nLEDs*3 + 1))
-	if *directFlag {
-		buf[0] = directMagicByte
-	} else {
-		buf[0] = serverMagicByte
+	buf := make([]byte, (nLEDs*3+1)*bufferfill)
+	for j := 0; j < bufferfill; j++ {
+		if *directFlag {
+			buf[j*(nLEDs*3+1)] = directMagicByte
+		} else {
+			buf[j*(nLEDs*3+1)] = serverMagicByte
+		}
 	}
 
 	var r, g, b uint8
@@ -92,6 +89,14 @@ func main() {
 
 	// Time between updates
 	tick := time.Tick(timestep)
+
+	conn, err := net.Dial("tcp", "bedroom_leds:9996")
+	if err != nil {
+		log.Fatalln("Couldn't open localhost: ", err)
+	}
+	defer conn.Close()
+
+	npackets := 0
 mainloop:
 	for {
 		select {
@@ -150,28 +155,30 @@ mainloop:
 		default:
 		}
 
-		if fades {
-			if pingpong {
-				s = 0.3 + scof*float64(steps-(tau%steps))
-			} else {
-				s = 0.3 + scof*float64(tau%steps)
+		for j := 0; j < (bufferfill - npackets); j++ {
+			if fades {
+				if pingpong {
+					s = 0.3 + scof*float64(steps-(tau%steps))
+				} else {
+					s = 0.3 + scof*float64(tau%steps)
+				}
 			}
-		}
 
-		for i := 0; i < nLEDs; i++ {
-			switch fadel {
-			case 0:
-			case 1:
-				l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*3))
-			case 2:
-				l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*1))
+			for i := 0; i < nLEDs; i++ {
+				switch fadel {
+				case 0:
+				case 1:
+					l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*3))
+				case 2:
+					l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*1))
+				}
+				r, g, b = color.HSLToRGB(h, s, l)
+				buf[((nLEDs*3+1)*j)+(1+i*3)], buf[((nLEDs*3+1)*j)+(2+i*3)], buf[((nLEDs*3+1)*j)+(3+i*3)] = map7(g)|0x80, map7(r)|0x80, map7(b)|0x80
 			}
-			r, g, b = color.HSLToRGB(h, s, l)
-			buf[1+i*3], buf[2+i*3], buf[3+i*3] = map7(g)|0x80, map7(r)|0x80, map7(b)|0x80
-		}
-		tau = (tau + 1)
-		if tau%steps == 0 {
-			pingpong = !pingpong
+			tau = (tau + 1)
+			if tau%steps == 0 {
+				pingpong = !pingpong
+			}
 		}
 		conn.Write(buf)
 
@@ -186,7 +193,7 @@ mainloop:
 			log.Fatalln("Couln't convert: ", err)
 		}
 
-		if npackets >= 4 {
+		if npackets >= bufferfill {
 			<-tick
 		}
 	}
