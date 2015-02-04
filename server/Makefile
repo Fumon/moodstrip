@@ -1,14 +1,14 @@
 BINARY = listen
 
 OBJS = $(BINARY).o
-OBJS += arduino-serial-lib.o
+OBJS += arduino-serial-lib.o hsl_to_rgb.o
 
 # LIBS += -lrt -lusb-1.0
 
 CC = gcc
 LD = gcc
 
-CFLAGS += -Os -Wall -Wextra -pg #I$(SDK)/usr/include
+CFLAGS += -Wall -Wextra -g #I$(SDK)/usr/include
 #CFLAGS += -ggdb3
 LDFLAGS += -L$(SDK)/usr/lib -L$(TOOL)/lib -L$(TOOL)/usr/lib -Wl,-rpath=$(TOOL)/lib $(LIBS)
 

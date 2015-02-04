@@ -19,6 +19,7 @@
 #include <sys/timerfd.h>
 
 #include "arduino-serial-lib.h"
+#include "hsl_to_rgb.h"
 
 #define nLEDS 92
 #define DEBUG
@@ -230,20 +231,50 @@ void send_queue_length(int clientSock) {
         exit(1);
       }
 }
+#define STEPS 1000
+
+uint8_t map7(uint8_t in) {
+  float tmp = (double)in * (127.0 / 255.0);
+  // Now round
+  tmp += 0.5;
+	return (uint8_t)tmp;
+}
+
+void GeneratePacket() {
+  static unsigned long tau = 0;
+  double H, S, L;
+  uint8_t R, G, B;
+  int i;
+  uint8_t *npkt = buffer[end]->buf;
+  uint8_t *buf = &npkt[1];
+
+  // Temp
+  H = 0.8;
+  S = 0.8;
+
+  npkt[0] = COMMANDBYTE;
+  for(i = 0; i < nLEDS; ++i) {
+    L = (0.008 / (double)nLEDS) * (double)((i + tau)%(nLEDS));
+    HSL_to_RGB(H, S, L, &R, &G, &B);
+    buf[i*3] = 0x80|map7(G);
+    buf[1+(i*3)] = 0x80|map7(R);
+    buf[2+(i*3)] = 0x80|map7(B);
+  }
+  tau += 1;
+  PushQueue();
+}
 
 void write_to_serial(int serialPort) {
-  // Retrieve next packet
-  struct item *d = RetrieveFromQueue();
-  // Replace magicbyte
-  d->buf[0] = COMMANDBYTE;
+  struct item *B = RetrieveFromQueue();
 
   // Write to arduino
-  int n = write(serialPort, d->buf, PACKETLENGTH);
+  int n = write(serialPort, B->buf, PACKETLENGTH);
   if(n != PACKETLENGTH) {
     err(1, "Could not write complete string");
     exit(1);
   }
 }
+
 
 void makeSocketNonBlocking(int fd) {
   int flags;
@@ -273,9 +304,9 @@ int main() {
 
   int  partialBufLen = 0;
   int parseret = 0;
-  size_t parseplace = 0;
-  uint8_t partialBuf[RECVBUFFLEN];
-  uint8_t itembuf[PACKETLENGTH];
+  //size_t parseplace = 0;
+  //uint8_t partialBuf[RECVBUFFLEN];
+  //uint8_t itembuf[PACKETLENGTH];
 
   int serialPort;
 
@@ -288,7 +319,7 @@ int main() {
   int nfds, n;
   struct epoll_event ev, events[MAX_EVENTS];
 
-  unsigned int missed = 0;
+  unsigned long long missed = 0;
   int timer = setup_timer();
 
   // Initialize socket
@@ -348,9 +379,11 @@ int main() {
   if(epoll_ctl(epollfd, EPOLL_CTL_ADD, killSig, &ev) < 0) {
     perror("epoll_ctl: timer");
   }
+  free_packetbuffer();
+  init_queue();
 
   for(;kill == 0;) {
-    nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+    nfds = epoll_wait(epollfd, events, MAX_EVENTS, 0);
     if(nfds == -1) {
       perror("epoll_wait");
       exit(1);
@@ -377,30 +410,28 @@ int main() {
         }
         
         // Now prepare for new data
-        free_packetbuffer();
-        init_queue();
         close_conn = 0;
         // Reset partial buffer
         partialBufLen = 0;
-      } else if(curfd == timer) {
-        // Time to push to serial
-        // Add number of events
-        unsigned int mtmp; // TODO: Try changing this to a smaller type
-        read(timer, &mtmp, sizeof(mtmp));
-        missed += mtmp;
-      } else if(curfd == serialPort) {
+      } else if(curfd == serialPort && missed) {
         // Check if we're to write yet
         if(active) { // TODO: Maybe just framedrop?
           do {
             write_to_serial(serialPort);
-          } while(active > 0);
+          } while(active);
         }
+      } else if(curfd == timer) {
+        // Time to push to serial
+        GeneratePacket();
+        // Add number of events
+        unsigned long long mtmp; // TODO: Try changing this to a smaller type
+        read(timer, &mtmp, sizeof(mtmp));
+        missed +=  1;
       } else if(curfd == killSig) {
         // Got a kill signal
         kill = 1;
       } else if(curfd == clientSock) {
         // Receive data
-        parseplace = 0;
         do {
           recvLen = read(clientSock, (void *)recvBuf, sizeof(recvBuf));
           if(recvLen < 0) {
@@ -420,6 +451,9 @@ int main() {
           }
 
           // Data
+          send(clientSock, (void *)recvBuf, recvLen, 0);
+
+          /*
           do {
             // Parse
             if((parseret = parse_packet(&parseplace, recvBuf, recvLen,
@@ -440,6 +474,7 @@ int main() {
               break;
             }
           } while(parseret > 0);
+          */
 
           if(parseret == -1) {
             close_conn = 1;

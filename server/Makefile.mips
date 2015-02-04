@@ -7,7 +7,7 @@ export SDK = $(STAGING_DIR)/target-mipsel_24kec+dsp_uClibc-0.9.33.2
 BINARY = listen
 
 OBJS = $(BINARY).o
-OBJS += arduino-serial-lib.o
+OBJS += arduino-serial-lib.o hsl_to_rgb.o
 
 # LIBS += -lrt -lusb-1.0
 
