@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
+#include <sys/time.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -16,9 +18,9 @@
 
 #include <sys/epoll.h>
 
-#include <sys/timerfd.h>
-
 #include "arduino-serial-lib.h"
+
+#define NSEC_PER_MSEC 1000000L
 
 #define nLEDS 92
 #define DEBUG
@@ -170,29 +172,6 @@ int parse_packet(size_t *parseplace, uint8_t *recvBuf, const size_t recvlen, uin
   return 0;
 }
 
-int setup_timer() {
-  int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
-
-  struct timespec interval = {
-    .tv_sec = 0,
-    .tv_nsec = 40000000
-  };
-
-  struct timespec expiration = {
-    .tv_sec = 0,
-    .tv_nsec = 40000000
-  };
-
-  struct itimerspec ispec = {
-    .it_interval = interval,
-    .it_value = expiration
-  };
-
-  timerfd_settime(fd, 0, &ispec, NULL);
-
-  return fd;
-}
-
 int setup_server_socket() {
   struct sockaddr_in servAddr;
   int servSock;
@@ -263,6 +242,39 @@ void makeSocketNonBlocking(int fd) {
   }       
 }
 
+
+int tsCompare (
+    struct timespec time1,
+    struct timespec time2)
+{
+  if (time1.tv_sec < time2.tv_sec)
+    return (-1) ; /* Less than. */
+  else if (time1.tv_sec > time2.tv_sec)
+    return (1) ; /* Greater than. */
+  else if (time1.tv_nsec < time2.tv_nsec)
+    return (-1) ; /* Less than. */
+  else if (time1.tv_nsec > time2.tv_nsec)
+    return (1) ; /* Greater than. */
+  else
+    return (0) ; /* Equal. */
+}
+
+
+struct timespec tsAdd (
+    struct timespec time1,
+    struct timespec time2)
+{ /* Local variables. */
+  struct timespec result ;
+  /* Add the two times together. */
+  result.tv_sec = time1.tv_sec + time2.tv_sec ;
+  result.tv_nsec = time1.tv_nsec + time2.tv_nsec ;
+  if (result.tv_nsec >= 1000000000L) { /* Carry? */
+    result.tv_sec++ ; result.tv_nsec = result.tv_nsec - 1000000000L ;
+  }
+  return (result) ;
+}
+
+
 int main() {
   struct sockaddr_in clientAddr;
   int servSock;
@@ -288,8 +300,12 @@ int main() {
   int nfds, n;
   struct epoll_event ev, events[MAX_EVENTS];
 
-  unsigned int missed = 0;
-  int timer = setup_timer();
+  struct timespec now_time;
+  struct timespec next_time = {0, 0};
+  struct timespec m40;
+  m40.tv_sec = 0;
+  m40.tv_nsec = 40 * NSEC_PER_MSEC;
+  uint32_t missed = 0;
 
   // Initialize socket
   if((servSock = setup_server_socket()) < 0) {
@@ -328,13 +344,6 @@ int main() {
     perror("epoll_ctl: servSock");
   }
 
-  // Add Timer
-  ev.events = EPOLLIN;
-  ev.data.fd = timer;
-  if(epoll_ctl(epollfd, EPOLL_CTL_ADD, timer, &ev) < 0) {
-    perror("epoll_ctl: timer");
-  }
-
   // Add serial
   ev.events = EPOLLOUT;
   ev.data.fd = serialPort;
@@ -346,11 +355,11 @@ int main() {
   ev.events = EPOLLIN;
   ev.data.fd = killSig;
   if(epoll_ctl(epollfd, EPOLL_CTL_ADD, killSig, &ev) < 0) {
-    perror("epoll_ctl: timer");
+    perror("epoll_ctl: killSig");
   }
 
   for(;kill == 0;) {
-    nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+    nfds = epoll_wait(epollfd, events, MAX_EVENTS, 0);
     if(nfds == -1) {
       perror("epoll_wait");
       exit(1);
@@ -382,20 +391,13 @@ int main() {
         close_conn = 0;
         // Reset partial buffer
         partialBufLen = 0;
-      } else if(curfd == timer) {
-        // Time to push to serial
-        // Add number of events
-        unsigned int mtmp; // TODO: Try changing this to a smaller type
-        read(timer, &mtmp, sizeof(mtmp));
-        missed += mtmp;
       } else if(curfd == serialPort) {
         // Check if we're to write yet
-        if(active) { // TODO: Maybe just framedrop?
-          do {
-            write_to_serial(serialPort);
-          } while(active > 0);
+        if(missed && active) { // TODO: Maybe just framedrop?
+          write_to_serial(serialPort);
+          missed--;
         }
-      } else if(curfd == killSig) {
+      }  else if(curfd == killSig) {
         // Got a kill signal
         kill = 1;
       } else if(curfd == clientSock) {
@@ -446,14 +448,20 @@ int main() {
             break;
           }
         } while(1);
-        send_queue_length(clientSock);
-        fprintf(stderr, "Packets: %d\n", active);
+        //send_queue_length(clientSock);
+        //fprintf(stderr, "Packets: %d\n", active);
 
         if(close_conn) {
           printf("Connection closed\n");
           epoll_ctl(epollfd, EPOLL_CTL_DEL, clientSock, NULL);
           close(clientSock);
         }
+      }
+
+      clock_gettime(CLOCK_MONOTONIC, &now_time);
+      if(tsCompare(now_time, next_time) >= 1) {
+        missed += 1;
+        next_time = tsAdd(now_time, m40);
       }
     }
   }
@@ -463,7 +471,6 @@ int main() {
   close(clientSock);
   shutdown(servSock, SHUT_RDWR);
   close(servSock);
-  close(timer);
   close(serialPort);
   return 0;
 }

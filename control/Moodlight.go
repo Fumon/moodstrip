@@ -5,7 +5,6 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"strconv"
 	"time"
 
 	"code.google.com/p/sadbox/color"
@@ -16,9 +15,10 @@ const nLEDs = 92
 const directMagicByte = 0x84
 const serverMagicByte = 0x0F
 const bufferfill = 5
+const pktlen = (nLEDs*3 + 1)
 
 var steps = 1000
-var timestep = 60 * time.Millisecond // milliseconds
+var timestep = 160 * time.Millisecond // milliseconds
 
 var fadelmodes = 3
 
@@ -55,12 +55,12 @@ func main() {
 		}
 	}()
 
-	buf := make([]byte, (nLEDs*3+1)*bufferfill)
+	buf := make([]byte, (pktlen)*bufferfill)
 	for j := 0; j < bufferfill; j++ {
 		if *directFlag {
-			buf[j*(nLEDs*3+1)] = directMagicByte
+			buf[j*(pktlen)] = directMagicByte
 		} else {
-			buf[j*(nLEDs*3+1)] = serverMagicByte
+			buf[j*(pktlen)] = serverMagicByte
 		}
 	}
 
@@ -96,7 +96,6 @@ func main() {
 	}
 	defer conn.Close()
 
-	npackets := 0
 mainloop:
 	for {
 		select {
@@ -155,7 +154,7 @@ mainloop:
 		default:
 		}
 
-		for j := 0; j < (bufferfill - npackets); j++ {
+		for j := 0; j < bufferfill; j++ {
 			if fades {
 				if pingpong {
 					s = 0.3 + scof*float64(steps-(tau%steps))
@@ -173,28 +172,15 @@ mainloop:
 					l = (0.008 / float64(nLEDs) * float64((i+tau)%nLEDs*1))
 				}
 				r, g, b = color.HSLToRGB(h, s, l)
-				buf[((nLEDs*3+1)*j)+(1+i*3)], buf[((nLEDs*3+1)*j)+(2+i*3)], buf[((nLEDs*3+1)*j)+(3+i*3)] = map7(g)|0x80, map7(r)|0x80, map7(b)|0x80
+				buf[((pktlen)*j)+(1+i*3)], buf[((pktlen)*j)+(2+i*3)], buf[((pktlen)*j)+(3+i*3)] = map7(g)|0x80, map7(r)|0x80, map7(b)|0x80
 			}
 			tau = (tau + 1)
 			if tau%steps == 0 {
 				pingpong = !pingpong
 			}
 		}
-		conn.Write(buf)
+		conn.Write(buf[:pktlen*bufferfill])
 
-		readBuf := make([]byte, 24)
-		n, err := conn.Read(readBuf)
-		if err != nil {
-			log.Fatalln("Couldn't read: ", err)
-		}
-
-		npackets, err := strconv.ParseInt(string(readBuf[:n-1]), 10, 64)
-		if err != nil {
-			log.Fatalln("Couln't convert: ", err)
-		}
-
-		if npackets >= bufferfill {
-			<-tick
-		}
+		<-tick
 	}
 }
